@@ -640,6 +640,99 @@
     }catch(e){ return {mon:'', day:'', full:''}; }
   }
 
+  /* ---- section breakdown (Floor / Lower / Upper) ---- */
+  var tierStyle = document.createElement('style');
+  tierStyle.textContent =
+    '.tiers{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:-2px 0 6px;padding:0 4px}' +
+    '.tiers[hidden]{display:none}' +
+    '.tier{background:var(--bg-soft);border:1px solid var(--line);border-radius:14px;padding:14px 16px}' +
+    '.tier .tname{font-weight:700;font-size:14px}' +
+    '.tier .tnote{font-size:11.5px;color:var(--ink-faint);margin-top:2px}' +
+    '.tier .tprice{font-family:"JetBrains Mono",monospace;font-weight:600;font-size:18px;margin-top:10px}' +
+    '.tier .tcount{font-size:12px;color:var(--ink-soft);margin-top:2px}' +
+    '.tier.empty{opacity:.55}' +
+    '.tiers .tmsg{grid-column:1/-1;text-align:center;font-size:13px;color:var(--ink-soft);padding:10px}' +
+    '@media (max-width:640px){.tiers{grid-template-columns:1fr}}';
+  document.head.appendChild(tierStyle);
+
+  var TIERS = [
+    {key:'floor', name:'Floor',       note:'Closest to the stage'},
+    {key:'lower', name:'Lower level', note:'Sections 100–199'},
+    {key:'upper', name:'Upper level', note:'Sections 200 and up'}
+  ];
+
+  // Edit these rules if a venue names its sections differently
+  function tierOf(section){
+    var s = String(section == null ? '' : section).toLowerCase().trim();
+    if(!s) return 'other';
+    if(/floor|pit|general admission|\bga\b|standing|field|golden circle/.test(s)) return 'floor';
+    if(/lower/.test(s)) return 'lower';
+    if(/upper|balcony|terrace|mezz|nosebleed/.test(s)) return 'upper';
+    var m = s.match(/\d+/);
+    if(m){
+      var n = parseInt(m[0], 10);
+      if(n >= 200) return 'upper';
+      if(n >= 100) return 'lower';
+      return 'floor';                       // "Section 1", "Sec 12"
+    }
+    if(/^(sec(tion)?\.?\s*)?[a-z]{1,2}$/.test(s)) return 'floor';   // "A", "Sec B"
+    return 'other';
+  }
+
+  // Returns price in cents (numbers) or converts decimal strings like "125.50"
+  function listingPrice(a){
+    var p = a.price != null ? a.price : (a.unit_price != null ? a.unit_price : a.ticket_price);
+    if(p && typeof p === 'object') p = p.amount != null ? p.amount : p.value;
+    if(p == null || p === '') return null;
+    if(typeof p === 'string' && p.indexOf('.') !== -1) return Math.round(parseFloat(p) * 100);
+    var n = Number(p);
+    return isNaN(n) ? null : n;
+  }
+
+  async function loadTiers(eventId, panel){
+    panel.innerHTML = '<div class="tmsg">Loading sections…</div>';
+    try{
+      var res = await fetch('/api/listings?event=' + encodeURIComponent(eventId));
+      var json = await res.json();
+      if(!res.ok) throw new Error('bad status');
+
+      var groups = {
+        floor:{n:0,tix:0,min:null}, lower:{n:0,tix:0,min:null},
+        upper:{n:0,tix:0,min:null}, other:{n:0,tix:0,min:null}
+      };
+      var listings = json.data || [];
+      listings.forEach(function(l){
+        var a = l.attributes || {};
+        var sec = a.section != null ? a.section : (a.section_name != null ? a.section_name : a.venue_section);
+        var g = groups[tierOf(sec)];
+        var price = listingPrice(a);
+        g.n += 1;
+        g.tix += Number(a.quantity != null ? a.quantity : a.available_quantity) || 0;
+        if(price != null && (g.min == null || price < g.min)) g.min = price;
+      });
+
+      if(!listings.length){
+        panel.innerHTML = '<div class="tmsg">No listings available right now.</div>';
+        return;
+      }
+      var defs = TIERS.slice();
+      if(groups.other.n) defs.push({key:'other', name:'Other sections', note:'Everything else'});
+
+      panel.innerHTML = defs.map(function(t){
+        var g = groups[t.key];
+        return '<div class="tier' + (g.n ? '' : ' empty') + '">' +
+          '<div class="tname">' + t.name + '</div>' +
+          '<div class="tnote">' + t.note + '</div>' +
+          '<div class="tprice">' + (g.n && g.min != null ? 'from ' + money(g.min) : '—') + '</div>' +
+          '<div class="tcount">' + (g.n ? g.n + ' listing' + (g.n > 1 ? 's' : '') + (g.tix ? ' · ' + g.tix + ' tickets' : '') : 'No listings') + '</div>' +
+        '</div>';
+      }).join('');
+    }catch(e){
+      panel.dataset.loaded = '';
+      panel.innerHTML = '<div class="tmsg">Couldn\'t load sections. Click the event to try again.</div>';
+    }
+  }
+
   async function liveSearch(){
     var artist = document.getElementById('artist').value.trim();
     var city = document.getElementById('city').value.trim();
@@ -655,7 +748,8 @@
     searchBtn.disabled = true;
 
     try{
-      var res = await fetch('/api/search?q=' + encodeURIComponent(artist));
+      var res = await fetch('/api/search?q=' + encodeURIComponent(artist) +
+        (city ? '&city=' + encodeURIComponent(city) : ''));
       var json = await res.json();
       if(!res.ok) throw new Error('Search failed');
 
@@ -670,18 +764,8 @@
         return venues[id] || {};
       }
 
-      // Keep only events whose name contains every word searched
-      var words = artist.toLowerCase().split(/\s+/);
-      var events = (json.data || []).filter(function(ev){
-        var name = String((ev.attributes || {}).event_name || '').toLowerCase();
-        return words.every(function(w){ return name.indexOf(w) !== -1; });
-      });
-      if(city && haveVenues){
-        events = events.filter(function(ev){
-          return String(venueOf(ev).city || '').toLowerCase().indexOf(city.toLowerCase()) !== -1;
-        });
-      }
-      events = events.slice(0, 12);
+      // The API now filters by keyword and city, so just take the first 12
+      var events = (json.data || []).slice(0, 12);
 
       if(!events.length){
         resultsHead.textContent = 'No matching events.';
@@ -716,12 +800,27 @@
             '<div class="pprice mono">' + money(s.get_in_price) + '</div>' +
             '<div class="pmeta">from · ' + esc(s.listing_count != null ? s.listing_count : 0) + ' listings</div>' +
           '</div>';
+        row.style.cursor = 'pointer';
         list.appendChild(row);
+
+        var panel = document.createElement('div');
+        panel.className = 'tiers';
+        panel.hidden = true;
+        list.appendChild(panel);
+
+        row.addEventListener('click', function(){
+          var opening = panel.hidden;
+          panel.hidden = !opening;
+          if(opening && !panel.dataset.loaded){
+            panel.dataset.loaded = '1';
+            loadTiers(ev.id, panel);
+          }
+        });
         setTimeout(function(){ row.classList.add('in-view'); }, 30);
       });
 
-      resultsHead.textContent = 'Showing ' + events.length + ' upcoming event' + (events.length > 1 ? 's' : '') + '.' +
-        (city && !haveVenues ? " (City filter isn't available yet, so all locations are shown.)" : '');
+      resultsHead.textContent = 'Showing ' + events.length + ' upcoming event' + (events.length > 1 ? 's' : '') + '. Click an event to see prices by section.' +
+        (city && json._cityFilter === 'unknown' ? " (We don't recognize that city yet, so all locations are shown.)" : '');
       resultsFoot.textContent = 'Prices are starting prices and can change quickly.';
     }catch(e){
       resultsHead.textContent = '';
