@@ -610,6 +610,130 @@
     document.getElementById('city').value = 'Los Angeles';
     goToResults('Bad Bunny','Los Angeles');
   });
+  /* ================= LIVE SEARCH (calls /api/search) ================= */
+  var resultsHead = document.querySelector('.results-head p');
+  var resultsFoot = document.querySelector('.results-foot');
+  var searchBtn = form.querySelector('.search-btn');
+
+  function esc(s){
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function(ch){
+      return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch];
+    });
+  }
+  // API prices look like cents (5044 -> $50.44). If they turn out to be dollars, remove "/ 100".
+  function money(cents){
+    return cents == null ? '—' :
+      '$' + (cents / 100).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
+  }
+  function showMessage(msg){
+    list.innerHTML = '<div class="results-foot">' + esc(msg) + '</div>';
+  }
+  function dateParts(a){
+    try{
+      var d = new Date(a.utc_occurs_at + 'Z');
+      var tz = a.time_zone || undefined;
+      return {
+        mon: d.toLocaleString('en-US', {month:'short', timeZone:tz}).toUpperCase(),
+        day: d.toLocaleString('en-US', {day:'numeric', timeZone:tz}),
+        full: d.toLocaleString('en-US', {weekday:'short', month:'short', day:'numeric', year:'numeric', hour:'numeric', minute:'2-digit', timeZone:tz})
+      };
+    }catch(e){ return {mon:'', day:'', full:''}; }
+  }
+
+  async function liveSearch(){
+    var artist = document.getElementById('artist').value.trim();
+    var city = document.getElementById('city').value.trim();
+
+    if(!artist){
+      title.textContent = 'Search for an event';
+      showMessage('Type an artist or event first.');
+      return;
+    }
+    title.textContent = city ? artist + ' — ' + city : artist;
+    resultsHead.textContent = 'Searching…';
+    showMessage('Searching…');
+    searchBtn.disabled = true;
+
+    try{
+      var res = await fetch('/api/search?q=' + encodeURIComponent(artist));
+      var json = await res.json();
+      if(!res.ok) throw new Error('Search failed');
+
+      // Venue details, if the API includes them
+      var venues = {};
+      (json.included || []).forEach(function(i){
+        if(i.type === 'venues') venues[i.id] = i.attributes || {};
+      });
+      var haveVenues = Object.keys(venues).length > 0;
+      function venueOf(ev){
+        var id = (((ev.relationships || {}).venue || {}).data || {}).id;
+        return venues[id] || {};
+      }
+
+      // Keep only events whose name contains every word searched
+      var words = artist.toLowerCase().split(/\s+/);
+      var events = (json.data || []).filter(function(ev){
+        var name = String((ev.attributes || {}).event_name || '').toLowerCase();
+        return words.every(function(w){ return name.indexOf(w) !== -1; });
+      });
+      if(city && haveVenues){
+        events = events.filter(function(ev){
+          return String(venueOf(ev).city || '').toLowerCase().indexOf(city.toLowerCase()) !== -1;
+        });
+      }
+      events = events.slice(0, 12);
+
+      if(!events.length){
+        resultsHead.textContent = 'No matching events.';
+        showMessage('No events found for "' + artist + '". Try another name.');
+        return;
+      }
+
+      var lowest = Math.min.apply(null, events.map(function(ev){
+        var p = ((ev.attributes || {}).summary || {}).get_in_price;
+        return p == null ? Infinity : p;
+      }));
+
+      list.innerHTML = '';
+      events.forEach(function(ev, i){
+        var a = ev.attributes || {};
+        var s = a.summary || {};
+        var dp = dateParts(a);
+        var v = venueOf(ev);
+        var venueText = [v.name, v.city].filter(Boolean).join(', ');
+        var meta = dp.full + (venueText ? ' · ' + venueText : '');
+        var isBest = lowest !== Infinity && s.get_in_price === lowest;
+
+        var row = document.createElement('div');
+        row.className = 'row' + (isBest ? ' best-row' : '');
+        row.style.transitionDelay = (i * 0.05) + 's';
+        row.innerHTML =
+          '<div class="badge" style="flex-direction:column;font-size:9.5px;line-height:1.15;letter-spacing:.04em;color:var(--violet-deep);background:var(--bg-soft)">' +
+            '<span>' + esc(dp.mon) + '</span><span style="font-size:16px;font-weight:800">' + esc(dp.day) + '</span></div>' +
+          '<div class="pinfo"><div class="pname">' + esc(a.event_name) + '</div><div class="pmeta">' + esc(meta) + '</div></div>' +
+          '<div class="pricewrap">' +
+            (isBest ? '<span class="best">Lowest price</span>' : '') +
+            '<div class="pprice mono">' + money(s.get_in_price) + '</div>' +
+            '<div class="pmeta">from · ' + esc(s.listing_count != null ? s.listing_count : 0) + ' listings</div>' +
+          '</div>';
+        list.appendChild(row);
+        setTimeout(function(){ row.classList.add('in-view'); }, 30);
+      });
+
+      resultsHead.textContent = 'Showing ' + events.length + ' upcoming event' + (events.length > 1 ? 's' : '') + '.' +
+        (city && !haveVenues ? " (City filter isn't available yet, so all locations are shown.)" : '');
+      resultsFoot.textContent = 'Prices are starting prices and can change quickly.';
+    }catch(e){
+      resultsHead.textContent = '';
+      showMessage('Something went wrong. Please try again.');
+    }finally{
+      searchBtn.disabled = false;
+    }
+  }
+
+  // These run after the existing handlers above, so the field values are already set
+  form.addEventListener('submit', liveSearch);
+  document.getElementById('tryDemo').addEventListener('click', liveSearch);
 })();
 </script>
 
