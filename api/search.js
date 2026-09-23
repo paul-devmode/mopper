@@ -5,25 +5,25 @@ export default async function handler(req, res) {
   const q = (req.query.q || "").trim();
   if (!q) return res.status(400).json({ error: "Missing search term" });
 
-  const base = process.env.AUTOMATIQ_BASE_URL;
-  const token = process.env.AUTOMATIQ_API_TOKEN;
+  const base = (process.env.AUTOMATIQ_BASE_URL || "").trim();
+  // Keep only the first token in case extra text or lines were pasted
+  const token = (process.env.AUTOMATIQ_API_TOKEN || "").trim().split(/\s+/)[0];
 
-  // Shows only whether the variables exist, never their values
   if (!base || !token) {
     return res.status(500).json({
-      error: "Missing environment variable",
+      error: "Server is not configured",
       hasBaseUrl: Boolean(base),
       hasToken: Boolean(token),
     });
   }
 
   try {
-    const url = new URL(SEARCH_PATH, base.trim());
+    const url = new URL(SEARCH_PATH, base);
     url.searchParams.set(KEYWORD_PARAM, q);
 
     const response = await fetch(url, {
       headers: {
-        Authorization: `Bearer ${token.trim()}`,
+        Authorization: `Bearer ${token}`,
         Accept: "application/json",
       },
     });
@@ -34,6 +34,7 @@ export default async function handler(req, res) {
 
     res.status(response.status).json(data);
   } catch (err) {
-    res.status(500).json({ error: "Search failed", detail: String(err.message || err) });
+    console.error("Search failed:", err.name);
+    res.status(500).json({ error: "Search failed" });
   }
 }
